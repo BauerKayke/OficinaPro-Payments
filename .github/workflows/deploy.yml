@@ -28,12 +28,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Convert repository name to lowercase
+        id: image_name
+        run: echo "name=$(echo ghcr.io/${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.sha }},ghcr.io/${{ github.repository }}:latest
+          tags: ${{ steps.image_name.outputs.name }}:${{ github.sha }},${{ steps.image_name.outputs.name }}:latest
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -62,8 +66,7 @@ jobs:
             # Atualizar repo (opcional, pois vamos mandar o yaml via cat ou git pull)
             # Vamos aplicar o yaml direto
             
-            IMAGE_NAME="ghcr.io/${{ github.repository }}:${{ github.sha }}"
-            IMAGE_NAME=$(echo $IMAGE_NAME | tr '[:upper:]' '[:lower:]')
+            IMAGE_NAME=$(echo "ghcr.io/${{ github.repository }}:${{ github.sha }}" | tr '[:upper:]' '[:lower:]')
             
             # Criar arquivo de deployment temporário com a imagem correta
             cat <<EOF > payment-deploy.yaml
