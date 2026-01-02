@@ -1,0 +1,135 @@
+name: Deploy Payment API
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      instance_ip:
+        description: 'IP da instância EC2 (Opcional)'
+        required: false
+        type: string
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }},ghcr.io/${{ github.repository }}:latest
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Find EC2 Instance IP
+        id: find_ip
+        run: |
+          if [ -n "${{ github.event.inputs.instance_ip }}" ]; then
+            echo "instance_ip=${{ github.event.inputs.instance_ip }}" >> $GITHUB_OUTPUT
+          else
+            IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=*k3s-node*" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].PublicIpAddress" --output text)
+            echo "instance_ip=$IP" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to K3s
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ steps.find_ip.outputs.instance_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Atualizar repo (opcional, pois vamos mandar o yaml via cat ou git pull)
+            # Vamos aplicar o yaml direto
+            
+            IMAGE_NAME="ghcr.io/${{ github.repository }}:${{ github.sha }}"
+            IMAGE_NAME=$(echo $IMAGE_NAME | tr '[:upper:]' '[:lower:]')
+            
+            # Criar arquivo de deployment temporário com a imagem correta
+            cat <<EOF > payment-deploy.yaml
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: payment-api
+              namespace: oficinapro-dev
+              labels:
+                app: payment-api
+            spec:
+              replicas: 1
+              selector:
+                matchLabels:
+                  app: payment-api
+              template:
+                metadata:
+                  labels:
+                    app: payment-api
+                spec:
+                  imagePullSecrets:
+                  - name: ghcr-secret
+                  containers:
+                  - name: payment-api
+                    image: $IMAGE_NAME
+                    imagePullPolicy: Always
+                    ports:
+                    - containerPort: 8000
+                    env:
+                    - name: MP_ACCESS_TOKEN
+                      value: "${{ secrets.MP_ACCESS_TOKEN }}"
+            ---
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: payment-service
+              namespace: oficinapro-dev
+            spec:
+              selector:
+                app: payment-api
+              ports:
+                - protocol: TCP
+                  port: 8080
+                  targetPort: 8000
+            ---
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            metadata:
+              name: payment-ingress
+              namespace: oficinapro-dev
+              annotations:
+                traefik.ingress.kubernetes.io/router.entrypoints: web
+            spec:
+              rules:
+              - http:
+                  paths:
+                  - path: /pagamento
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: payment-service
+                        port:
+                          number: 8080
+            EOF
+            
+            export KUBECONFIG=~/.kube/config
+            /usr/local/bin/k3s kubectl apply -f payment-deploy.yaml
+            /usr/local/bin/k3s kubectl rollout status deployment/payment-api -n oficinapro-dev --timeout=2m
+

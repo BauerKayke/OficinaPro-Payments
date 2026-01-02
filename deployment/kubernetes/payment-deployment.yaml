@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-api
+  namespace: oficinapro-dev # Assumindo dev por padrão
+  labels:
+    app: payment-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-api
+  template:
+    metadata:
+      labels:
+        app: payment-api
+    spec:
+      imagePullSecrets:
+      - name: ghcr-secret
+      containers:
+      - name: payment-api
+        image: ghcr.io/bauerkayke/oficinapro-payments:latest # Será substituído pelo CI
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: MP_ACCESS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: oficinapro-secrets
+              key: MP_ACCESS_TOKEN
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: oficinapro-dev
+spec:
+  selector:
+    app: payment-api
+  ports:
+    - protocol: TCP
+      port: 8080 # Porta interna do cluster
+      targetPort: 8000 # Porta do container Python
+
