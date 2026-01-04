@@ -135,7 +135,7 @@ jobs:
               name: payment-ingress
               namespace: oficinapro-dev
               annotations:
-                nginx.ingress.kubernetes.io/rewrite-target: /$2
+                nginx.ingress.kubernetes.io/rewrite-target: /api/v1/$2
             spec:
               ingressClassName: nginx
               rules:
