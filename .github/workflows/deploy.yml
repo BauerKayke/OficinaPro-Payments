@@ -56,6 +56,23 @@ jobs:
             echo "instance_ip=$IP" >> $GITHUB_OUTPUT
           fi
 
+      - name: Debug SSH Key (Check format)
+        run: |
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error::A Secret SSH_PRIVATE_KEY está VAZIA!"
+            exit 1
+          else
+            echo "A Secret SSH_PRIVATE_KEY foi encontrada."
+            echo "Comprimento da chave: ${#SSH_KEY} caracteres."
+            echo "Primeira linha (verificar header): $(echo "$SSH_KEY" | head -n 1)"
+            if [[ "$SSH_KEY" != *"-----BEGIN"* ]]; then
+               echo "::error::A chave não começa com -----BEGIN. Verifique a cópia!"
+               exit 1
+            fi
+          fi
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
       - name: Deploy to K3s
         uses: appleboy/ssh-action@master
         with:
@@ -97,7 +114,7 @@ jobs:
                     - containerPort: 8000
                     env:
                     - name: MP_ACCESS_TOKEN
-                      value: "${{ secrets.MP_ACCESS_TOKEN }}"
+                      value: "${{ secrets.MP_TOKEN }}"
             ---
             apiVersion: v1
             kind: Service
