@@ -135,12 +135,13 @@ jobs:
               name: payment-ingress
               namespace: oficinapro-dev
               annotations:
-                traefik.ingress.kubernetes.io/router.entrypoints: web
+                nginx.ingress.kubernetes.io/rewrite-target: /$2
             spec:
+              ingressClassName: nginx
               rules:
               - http:
                   paths:
-                  - path: /pagamento
+                  - path: /pagamento(/|$)(.*)
                     pathType: Prefix
                     backend:
                       service:
