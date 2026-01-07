@@ -8,3 +8,11 @@ pytest==8.0.0
 httpx==0.26.0
 black==24.2.0
 isort==5.13.2
+
+# OpenTelemetry - Observability (Traces, Metrics, Logs)
+opentelemetry-api==1.22.0
+opentelemetry-sdk==1.22.0
+opentelemetry-exporter-otlp==1.22.0
+opentelemetry-instrumentation-fastapi==0.43b0
+opentelemetry-instrumentation-requests==0.43b0
+opentelemetry-instrumentation-logging==0.43b0
