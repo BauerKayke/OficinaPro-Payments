@@ -49,11 +49,34 @@ jobs:
       - name: Find EC2 Instance IP
         id: find_ip
         run: |
+          # Prioridade 1: IP do input manual
           if [ -n "${{ github.event.inputs.instance_ip }}" ]; then
             echo "instance_ip=${{ github.event.inputs.instance_ip }}" >> $GITHUB_OUTPUT
+            echo "✅ Usando IP fornecido manualmente: ${{ github.event.inputs.instance_ip }}"
+          # Prioridade 2: AWS Parameter Store (mais rápido e confiável)
           else
-            IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=*k3s-node*" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].PublicIpAddress" --output text)
+            echo "🔍 Buscando IP no AWS Parameter Store..."
+            IP=$(aws ssm get-parameter \
+              --name "/oficinapro/k3s/ec2-public-ip" \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null || echo "")
+
+            # Fallback 3: Buscar via EC2 describe-instances
+            if [ -z "$IP" ]; then
+              echo "⚠️  Parameter Store não encontrado, buscando via AWS CLI..."
+              IP=$(aws ec2 describe-instances \
+                --filters "Name=tag:Name,Values=*k3s-node*" \
+                          "Name=instance-state-name,Values=running" \
+                --query "Reservations[*].Instances[*].PublicIpAddress" \
+                --output text)
+            fi
+
+            if [ -z "$IP" ]; then
+              echo "::error::Não foi possível encontrar o IP da instância EC2"
+              exit 1
+            fi
             echo "instance_ip=$IP" >> $GITHUB_OUTPUT
+            echo "✅ IP encontrado: $IP"
           fi
 
       - name: Debug SSH Key (Check format)
@@ -82,9 +105,9 @@ jobs:
           script: |
             # Atualizar repo (opcional, pois vamos mandar o yaml via cat ou git pull)
             # Vamos aplicar o yaml direto
-            
+
             IMAGE_NAME=$(echo "ghcr.io/${{ github.repository }}:${{ github.sha }}" | tr '[:upper:]' '[:lower:]')
-            
+
             # Criar arquivo de deployment temporário com a imagem correta
             cat <<EOF > payment-deploy.yaml
             apiVersion: apps/v1
@@ -149,7 +172,7 @@ jobs:
                         port:
                           number: 8080
             EOF
-            
+
             export KUBECONFIG=~/.kube/config
             /usr/local/bin/k3s kubectl apply -f payment-deploy.yaml
             /usr/local/bin/k3s kubectl rollout status deployment/payment-api -n oficinapro-dev --timeout=2m
