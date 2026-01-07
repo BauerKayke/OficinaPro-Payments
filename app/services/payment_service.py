@@ -8,7 +8,7 @@ Inclui traces OpenTelemetry para observabilidade.
 
 import mercadopago
 import os
-from app.schemas import PaymentRequest, PaymentResponse, PaymentMethod
+from app.schemas import PaymentRequest, PaymentResponse, PaymentMethod, RefundRequest, RefundResponse
 from app.logging_config import get_logger
 from app.telemetry import get_tracer, get_meter
 from opentelemetry import trace
@@ -31,6 +31,12 @@ payment_duration = meter.create_histogram(
     name="payment.duration.ms",
     description="Duração do processamento de pagamento",
     unit="ms"
+)
+
+refund_counter = meter.create_counter(
+    name="refund.processed.total",
+    description="Total de estornos processados",
+    unit="1"
 )
 
 class PaymentService:
@@ -203,4 +209,131 @@ class PaymentService:
             transaction_id=f"MOCK-{request.order_id}",
             message=message,
             status="approved" if success else "rejected"
+        )
+
+    def process_refund(self, request: RefundRequest) -> RefundResponse:
+        """Processa um estorno de pagamento com tracing OpenTelemetry."""
+        import time
+        from decimal import Decimal
+        start_time = time.time()
+
+        with tracer.start_as_current_span("payment.refund") as span:
+            span.set_attribute("refund.transaction_id", request.transaction_id)
+            span.set_attribute("refund.amount", float(request.amount) if request.amount else 0)
+            span.set_attribute("refund.reason", request.reason or "")
+
+            if not self.sdk:
+                span.set_attribute("refund.success", False)
+                span.set_attribute("refund.error", "SDK not configured")
+                return RefundResponse(
+                    success=False,
+                    transaction_id=request.transaction_id,
+                    message="Serviço de Pagamento não configurado",
+                    status="error"
+                )
+
+            try:
+                # Verificar se é um ID simulado (MOCK-)
+                if request.transaction_id.startswith("MOCK-"):
+                    logger.info("Processing mock refund",
+                               transaction_id=request.transaction_id,
+                               amount=float(request.amount) if request.amount else "total")
+                    return self._mock_refund_response(request, success=True,
+                                                       message="Estorno simulado processado com sucesso")
+
+                # Processar estorno real via Mercado Pago
+                refund_data = {}
+                if request.amount:
+                    refund_data["amount"] = float(request.amount)
+
+                logger.info("Processing refund via Mercado Pago",
+                           transaction_id=request.transaction_id,
+                           amount=float(request.amount) if request.amount else "total")
+
+                # Chamar API de estorno do Mercado Pago
+                refund_response = self.sdk.refund().create(
+                    request.transaction_id,
+                    refund_data
+                )
+
+                response = refund_response.get("response", {})
+                status_code = refund_response.get("status", 500)
+
+                if status_code in [200, 201]:
+                    refund_id = str(response.get("id", ""))
+                    amount_refunded = Decimal(str(response.get("amount", 0)))
+
+                    span.set_attribute("refund.success", True)
+                    span.set_attribute("refund.id", refund_id)
+
+                    refund_counter.add(1, {
+                        "success": "true",
+                        "status": response.get("status", "approved")
+                    })
+
+                    logger.info("Refund processed successfully",
+                               transaction_id=request.transaction_id,
+                               refund_id=refund_id,
+                               amount_refunded=float(amount_refunded))
+
+                    return RefundResponse(
+                        success=True,
+                        refund_id=refund_id,
+                        transaction_id=request.transaction_id,
+                        message="Estorno processado com sucesso",
+                        status=response.get("status", "approved"),
+                        amount_refunded=amount_refunded
+                    )
+                else:
+                    error_message = response.get("message", "Erro ao processar estorno")
+                    span.set_attribute("refund.success", False)
+                    span.set_attribute("refund.error", error_message)
+
+                    refund_counter.add(1, {
+                        "success": "false",
+                        "status": "error"
+                    })
+
+                    logger.error("Refund failed",
+                                transaction_id=request.transaction_id,
+                                error=error_message,
+                                status_code=status_code)
+
+                    return RefundResponse(
+                        success=False,
+                        transaction_id=request.transaction_id,
+                        message=error_message,
+                        status="error"
+                    )
+
+            except Exception as e:
+                span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                span.record_exception(e)
+
+                refund_counter.add(1, {
+                    "success": "false",
+                    "status": "exception"
+                })
+
+                logger.exception("Refund processing failed",
+                               transaction_id=request.transaction_id,
+                               error=str(e))
+
+                return RefundResponse(
+                    success=False,
+                    transaction_id=request.transaction_id,
+                    message=f"Erro ao processar estorno: {str(e)}",
+                    status="error"
+                )
+
+    def _mock_refund_response(self, request: RefundRequest, success: bool, message: str) -> RefundResponse:
+        """Resposta simulada para estornos de transações MOCK."""
+        from decimal import Decimal
+        return RefundResponse(
+            success=success,
+            refund_id=f"REFUND-{request.transaction_id}" if success else None,
+            transaction_id=request.transaction_id,
+            message=message,
+            status="approved" if success else "rejected",
+            amount_refunded=request.amount if success else None
         )
