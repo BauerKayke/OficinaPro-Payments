@@ -5,7 +5,7 @@ Tech Challenge FIAP - Microserviço de Pagamentos
 """
 
 from fastapi import APIRouter, HTTPException
-from app.schemas import PaymentRequest, PaymentResponse
+from app.schemas import PaymentRequest, PaymentResponse, RefundRequest, RefundResponse
 from app.services.payment_service import PaymentService
 from app.logging_config import get_logger
 
@@ -31,6 +31,29 @@ async def create_payment(request: PaymentRequest):
     logger.info("Payment processed",
                order_id=request.order_id,
                transaction_id=response.transaction_id,
+               success=response.success,
+               status=response.status)
+
+    return response
+
+
+@router.post("/refunds", response_model=RefundResponse, tags=["Refunds"])
+async def create_refund(request: RefundRequest):
+    """
+    Processa um estorno de pagamento.
+
+    Permite estorno total ou parcial de uma transação previamente aprovada.
+    """
+    logger.info("Refund request received",
+               transaction_id=request.transaction_id,
+               amount=float(request.amount) if request.amount else "total",
+               reason=request.reason)
+
+    response = payment_service.process_refund(request)
+
+    logger.info("Refund processed",
+               transaction_id=request.transaction_id,
+               refund_id=response.refund_id,
                success=response.success,
                status=response.status)
 

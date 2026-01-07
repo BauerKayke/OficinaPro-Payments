@@ -21,7 +21,7 @@ class PaymentRequest(BaseModel):
     amount: Decimal = Field(..., gt=0, description="Payment amount")
     method: PaymentMethod = Field(..., description="Payment method")
     description: str = Field(..., description="Payment description")
-    
+
     card_data: Optional[CardData] = None
     payer_email: str = Field(..., description="Payer email for notification")
     payer_cpf: Optional[str] = Field(None, description="Payer CPF (required for Boleto/Pix sometimes)")
@@ -34,8 +34,25 @@ class PaymentResponse(BaseModel):
     qr_code: Optional[str] = None
     qr_code_base64: Optional[str] = None
     ticket_url: Optional[str] = None
-    
+
 class PaymentStatusResponse(BaseModel):
     transaction_id: str
     status: str
     status_detail: str
+
+
+class RefundRequest(BaseModel):
+    """Requisição de estorno de pagamento."""
+    transaction_id: str = Field(..., description="ID da transação a ser estornada")
+    amount: Optional[Decimal] = Field(None, gt=0, description="Valor a estornar (None = estorno total)")
+    reason: Optional[str] = Field(None, description="Motivo do estorno")
+
+
+class RefundResponse(BaseModel):
+    """Resposta do estorno de pagamento."""
+    success: bool
+    refund_id: Optional[str] = None
+    transaction_id: str
+    message: str
+    status: str
+    amount_refunded: Optional[Decimal] = None
