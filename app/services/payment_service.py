@@ -1,36 +1,105 @@
+"""
+Serviço de processamento de pagamentos via Mercado Pago.
+
+Tech Challenge FIAP - Microserviço de Pagamentos
+Implementa integração com Mercado Pago para PIX, Cartão e Boleto.
+Inclui traces OpenTelemetry para observabilidade.
+"""
+
 import mercadopago
 import os
 from app.schemas import PaymentRequest, PaymentResponse, PaymentMethod
-import logging
+from app.logging_config import get_logger
+from app.telemetry import get_tracer, get_meter
+from opentelemetry import trace
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Logger estruturado para observabilidade
+logger = get_logger(__name__)
+
+# Tracer e Meter para OpenTelemetry
+tracer = get_tracer(__name__)
+meter = get_meter(__name__)
+
+# Métricas customizadas
+payment_counter = meter.create_counter(
+    name="payment.processed.total",
+    description="Total de pagamentos processados",
+    unit="1"
+)
+
+payment_duration = meter.create_histogram(
+    name="payment.duration.ms",
+    description="Duração do processamento de pagamento",
+    unit="ms"
+)
 
 class PaymentService:
     def __init__(self):
         access_token = os.getenv("MP_ACCESS_TOKEN")
         if not access_token:
-            logger.warning("MP_ACCESS_TOKEN não encontrado. Integração com Mercado Pago falhará.")
+            logger.warning("Mercado Pago access token not found",
+                          error="MP_ACCESS_TOKEN environment variable not set")
             self.sdk = None
         else:
+            logger.info("Payment service initialized", provider="mercadopago")
             self.sdk = mercadopago.SDK(access_token)
 
     def process_payment(self, request: PaymentRequest) -> PaymentResponse:
-        if not self.sdk:
-            return self._mock_response(request, success=False, message="Serviço de Pagamento não encontrado")
+        """Processa um pagamento com tracing OpenTelemetry."""
+        import time
+        start_time = time.time()
 
-        try:
-            if request.method == PaymentMethod.PIX:
-                return self._process_pix(request)
-            elif request.method in [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD]:
-                return self._process_card(request)
-            elif request.method == PaymentMethod.BOLETO:
-                return self._process_boleto(request)
-            else:
-                return self._mock_response(request, success=False, message="Método de pagamento não implementado")
-        except Exception as e:
-            logger.error(f"Error processing payment: {e}")
-            return self._mock_response(request, success=False, message=str(e))
+        # Criar span para rastrear a operação de pagamento
+        with tracer.start_as_current_span("payment.process") as span:
+            # Adicionar atributos ao span
+            span.set_attribute("payment.order_id", request.order_id)
+            span.set_attribute("payment.method", request.method.value)
+            span.set_attribute("payment.amount", float(request.amount))
+            span.set_attribute("payment.payer_email", request.payer_email)
+
+            if not self.sdk:
+                span.set_attribute("payment.success", False)
+                span.set_attribute("payment.error", "SDK not configured")
+                return self._mock_response(request, success=False, message="Serviço de Pagamento não encontrado")
+
+            try:
+                if request.method == PaymentMethod.PIX:
+                    response = self._process_pix(request)
+                elif request.method in [PaymentMethod.CREDIT_CARD, PaymentMethod.DEBIT_CARD]:
+                    response = self._process_card(request)
+                elif request.method == PaymentMethod.BOLETO:
+                    response = self._process_boleto(request)
+                else:
+                    response = self._mock_response(request, success=False, message="Método de pagamento não implementado")
+
+                # Registrar resultado no span
+                span.set_attribute("payment.success", response.success)
+                span.set_attribute("payment.status", response.status)
+                span.set_attribute("payment.transaction_id", response.transaction_id)
+
+                # Registrar métricas
+                duration_ms = (time.time() - start_time) * 1000
+                payment_counter.add(1, {
+                    "method": request.method.value,
+                    "success": str(response.success),
+                    "status": response.status
+                })
+                payment_duration.record(duration_ms, {
+                    "method": request.method.value,
+                    "success": str(response.success)
+                })
+
+                return response
+
+            except Exception as e:
+                span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                span.record_exception(e)
+                logger.exception("Payment processing failed",
+                               order_id=request.order_id,
+                               method=request.method.value,
+                               amount=float(request.amount),
+                               error=str(e))
+                return self._mock_response(request, success=False, message=str(e))
 
     def _process_pix(self, request: PaymentRequest) -> PaymentResponse:
         payment_data = {
@@ -47,15 +116,15 @@ class PaymentService:
                 }
             }
         }
-        
+
         return self._create_preference(payment_data, request)
 
     def _process_card(self, request: PaymentRequest) -> PaymentResponse:
         if not request.card_data:
             return self._mock_response(request, success=False, message="Dados do cartão de crédito ausentes")
 
-        
-        
+
+
         payment_data = {
             "transaction_amount": float(request.amount),
             "description": request.description,
@@ -64,15 +133,19 @@ class PaymentService:
                 "email": request.payer_email
             }
         }
-        
-        logger.info("Simulating Card Payment (Real card processing requires frontend tokenization)")
+
+        logger.info("Card payment simulated",
+                   order_id=request.order_id,
+                   method="card",
+                   amount=float(request.amount),
+                   note="Real card processing requires frontend tokenization")
         return self._mock_response(request, success=True, message="Pagamento com cartão de crédito processado (Simulado)")
 
     def _process_boleto(self, request: PaymentRequest) -> PaymentResponse:
         payment_data = {
             "transaction_amount": float(request.amount),
             "description": request.description,
-            "payment_method_id": "bolbradesco", 
+            "payment_method_id": "bolbradesco",
             "payer": {
                 "email": request.payer_email,
                 "first_name": "Test",
@@ -94,15 +167,19 @@ class PaymentService:
         return self._create_preference(payment_data, request)
 
     def _create_preference(self, payment_data, request) -> PaymentResponse:
-        logger.info(f"Creating payment with data: {payment_data}")
+        logger.info("Creating payment preference",
+                   order_id=request.order_id,
+                   method=request.method.value,
+                   amount=payment_data.get("transaction_amount"),
+                   payer_email=payment_data.get("payer", {}).get("email"))
         payment_response = self.sdk.payment().create(payment_data)
         response = payment_response["response"]
-        
+
         if payment_response["status"] == 201:
             qr_code = response.get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code")
             qr_code_base64 = response.get("point_of_interaction", {}).get("transaction_data", {}).get("qr_code_base64")
             ticket_url = response.get("transaction_details", {}).get("external_resource_url")
-            
+
             return PaymentResponse(
                 success=True,
                 transaction_id=str(response.get("id")),
