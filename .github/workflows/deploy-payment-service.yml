@@ -70,9 +70,9 @@ jobs:
         run: |
           echo "### 🧪 Testando imagem" >> $GITHUB_STEP_SUMMARY
 
-          # Rodar container temporário
+          # Rodar container temporário (porta 8000 → 8080)
           CONTAINER_ID=$(docker run -d \
-            -p 8080:8080 \
+            -p 8080:8000 \
             -e MP_ACCESS_TOKEN="TEST-TOKEN" \
             ${{ steps.image_info.outputs.full_image }})
 
@@ -84,7 +84,7 @@ jobs:
 
           # Testar health check
           for i in {1..10}; do
-            if curl -f http://localhost:8080/api/v1/health; then
+            if curl -f http://localhost:8080/health; then
               echo "✅ Health check passou!" >> $GITHUB_STEP_SUMMARY
               docker stop ${CONTAINER_ID}
               exit 0
@@ -93,7 +93,7 @@ jobs:
             sleep 3
           done
 
-          echo "❌ Health check falhou!" >> $GITHUB_STEP_SUMMARY
+          echo "❌ Health check falhou! Mostrando logs:" >> $GITHUB_STEP_SUMMARY
           docker logs ${CONTAINER_ID}
           docker stop ${CONTAINER_ID}
           exit 1
@@ -234,7 +234,7 @@ jobs:
                     image: PLACEHOLDER_IMAGE
                     imagePullPolicy: Always
                     ports:
-                    - containerPort: 8080
+                    - containerPort: 8000
                       name: http
                       protocol: TCP
                     env:
@@ -244,7 +244,7 @@ jobs:
                           name: payment-service-secrets
                           key: MP_ACCESS_TOKEN
                     - name: PORT
-                      value: "8080"
+                      value: "8000"
                     envFrom:
                     - configMapRef:
                         name: payment-service-config
@@ -257,8 +257,8 @@ jobs:
                         cpu: "500m"
                     livenessProbe:
                       httpGet:
-                        path: /api/v1/health
-                        port: 8080
+                        path: /health
+                        port: 8000
                         scheme: HTTP
                       initialDelaySeconds: 30
                       periodSeconds: 10
@@ -267,8 +267,8 @@ jobs:
                       failureThreshold: 3
                     readinessProbe:
                       httpGet:
-                        path: /api/v1/health
-                        port: 8080
+                        path: /health
+                        port: 8000
                         scheme: HTTP
                       initialDelaySeconds: 10
                       periodSeconds: 5
@@ -277,8 +277,8 @@ jobs:
                       failureThreshold: 3
                     startupProbe:
                       httpGet:
-                        path: /api/v1/health
-                        port: 8080
+                        path: /health
+                        port: 8000
                         scheme: HTTP
                       initialDelaySeconds: 0
                       periodSeconds: 10
@@ -309,7 +309,7 @@ jobs:
                   timeoutSeconds: 10800
               ports:
               - port: 8080
-                targetPort: 8080
+                targetPort: 8000
                 protocol: TCP
                 name: http
               selector:
@@ -408,7 +408,7 @@ jobs:
               --rm \
               -i \
               -n ${{ env.K8S_NAMESPACE }} \
-              -- curl -s http://payment-service.${{ env.K8S_NAMESPACE }}.svc.cluster.local:8080/api/v1/health || echo "Health check falhou"
+              -- curl -s http://payment-service.${{ env.K8S_NAMESPACE }}.svc.cluster.local:8080/health || echo "Health check falhou"
 
             echo ""
             echo "==============================================="
@@ -449,7 +449,7 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "📝 **Próximos passos:**" >> $GITHUB_STEP_SUMMARY
             echo "- Verificar logs: \`kubectl logs -f -n oficinapro-dev -l app=payment-service\`" >> $GITHUB_STEP_SUMMARY
-            echo "- Testar health: \`curl http://payment-service.oficinapro-dev.svc.cluster.local:8080/api/v1/health\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Testar health: \`curl http://payment-service.oficinapro-dev.svc.cluster.local:8080/health\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "### ❌ Deploy falhou" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
