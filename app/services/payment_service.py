@@ -10,7 +10,7 @@ import mercadopago
 import os
 from app.schemas import PaymentRequest, PaymentResponse, PaymentMethod, RefundRequest, RefundResponse
 from app.logging_config import get_logger
-from app.telemetry import get_tracer, get_meter
+from app.telemetry import get_tracer, get_meter, force_flush_metrics
 from opentelemetry import trace
 
 # Logger estruturado para observabilidade
@@ -94,6 +94,9 @@ class PaymentService:
                     "method": request.method.value,
                     "success": str(response.success)
                 })
+
+                # Flush síncrono de métricas para envio imediato
+                force_flush_metrics(timeout_millis=500)
 
                 return response
 
@@ -271,6 +274,9 @@ class PaymentService:
                         "status": response.get("status", "approved")
                     })
 
+                    # Flush síncrono de métricas
+                    force_flush_metrics(timeout_millis=500)
+
                     logger.info("Refund processed successfully",
                                transaction_id=request.transaction_id,
                                refund_id=refund_id,
@@ -294,6 +300,9 @@ class PaymentService:
                         "status": "error"
                     })
 
+                    # Flush síncrono de métricas
+                    force_flush_metrics(timeout_millis=500)
+
                     logger.error("Refund failed",
                                 transaction_id=request.transaction_id,
                                 error=error_message,
@@ -314,6 +323,9 @@ class PaymentService:
                     "success": "false",
                     "status": "exception"
                 })
+
+                # Flush síncrono de métricas
+                force_flush_metrics(timeout_millis=500)
 
                 logger.exception("Refund processing failed",
                                transaction_id=request.transaction_id,
