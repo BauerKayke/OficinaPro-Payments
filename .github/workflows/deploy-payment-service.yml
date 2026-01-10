@@ -242,13 +242,14 @@ jobs:
               --dry-run=client -o yaml | /usr/local/bin/k3s kubectl apply -f -
             echo "✅ Secret GHCR configurado"
 
-            # Criar/atualizar Secret do Mercado Pago
-            echo "🔐 Criando secret do Mercado Pago..."
+            # Criar/atualizar Secret do Mercado Pago + New Relic
+            echo "🔐 Criando secrets (MP + New Relic)..."
             /usr/local/bin/k3s kubectl create secret generic payment-service-secrets \
               --from-literal=MP_ACCESS_TOKEN="${{ secrets.MP_TOKEN }}" \
+              --from-literal=NEW_RELIC_LICENSE_KEY="${{ secrets.NEW_RELIC_LICENSE_KEY }}" \
               -n ${{ env.K8S_NAMESPACE }} \
               --dry-run=client -o yaml | /usr/local/bin/k3s kubectl apply -f -
-            echo "✅ Secret Mercado Pago configurado"
+            echo "✅ Secrets configurados (MP + New Relic)"
 
             # Criar manifests temporários (mesmo padrão inline do Core Service)
             cat > /tmp/payment-deployment.yaml << 'MANIFEST_EOF'
@@ -309,6 +310,11 @@ jobs:
                         secretKeyRef:
                           name: payment-service-secrets
                           key: MP_ACCESS_TOKEN
+                    - name: NEW_RELIC_LICENSE_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: payment-service-secrets
+                          key: NEW_RELIC_LICENSE_KEY
                     - name: PORT
                       value: "8000"
                     envFrom:
@@ -374,7 +380,7 @@ jobs:
                 clientIP:
                   timeoutSeconds: 10800
               ports:
-              - port: 8080
+              - port: 8000
                 targetPort: 8000
                 protocol: TCP
                 name: http
@@ -431,16 +437,46 @@ jobs:
             /usr/local/bin/k3s kubectl apply -f /tmp/payment-deployment.yaml
             echo "✅ Manifests aplicados"
 
-            # Aguardar rollout
+            # Aguardar rollout (com retry para lidar com timeouts do K8s API)
             echo ""
             echo "⏳ Aguardando rollout do deployment..."
             echo "Isso pode levar até 5 minutos..."
-            if /usr/local/bin/k3s kubectl rollout status deployment/payment-service \
-              -n ${{ env.K8S_NAMESPACE }} \
-              --timeout=5m; then
-              echo "✅ Deploy concluído com sucesso!"
-            else
-              echo "❌ Rollout falhou ou deu timeout!"
+
+            # Tentar 3 vezes com timeout menor (mais resiliente a problemas de rede/TLS)
+            ROLLOUT_SUCCESS=false
+            for attempt in 1 2 3; do
+              echo "Tentativa $attempt/3..."
+              if /usr/local/bin/k3s kubectl rollout status deployment/payment-service \
+                -n ${{ env.K8S_NAMESPACE }} \
+                --timeout=90s 2>&1; then
+                echo "✅ Deploy concluído com sucesso!"
+                ROLLOUT_SUCCESS=true
+                break
+              else
+                echo "⚠️  Timeout/erro na tentativa $attempt"
+                echo "Verificando estado real dos pods..."
+
+                # Verificar se pods estão realmente prontos (independente do timeout)
+                READY=$(/usr/local/bin/k3s kubectl get deployment payment-service -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+                DESIRED=$(/usr/local/bin/k3s kubectl get deployment payment-service -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "2")
+
+                echo "Pods prontos: $READY/$DESIRED"
+
+                if [ "$READY" = "$DESIRED" ] && [ "$READY" != "0" ]; then
+                  echo "✅ Pods estão prontos! (Timeout foi do kubectl, não do deploy)"
+                  ROLLOUT_SUCCESS=true
+                  break
+                fi
+
+                if [ $attempt -lt 3 ]; then
+                  echo "Aguardando 15s antes de tentar novamente..."
+                  sleep 15
+                fi
+              fi
+            done
+
+            if [ "$ROLLOUT_SUCCESS" = "false" ]; then
+              echo "❌ Rollout falhou após 3 tentativas!"
               echo ""
               echo "==============================================="
               echo "=== 🔍 DIAGNÓSTICO DO ERRO ==="
@@ -531,7 +567,7 @@ jobs:
               --rm \
               -i \
               -n ${{ env.K8S_NAMESPACE }} \
-              -- curl -v http://payment-service.${{ env.K8S_NAMESPACE }}.svc.cluster.local:8080/health 2>&1 || echo "⚠️  Health check falhou"
+              -- curl -v http://payment-service.${{ env.K8S_NAMESPACE }}.svc.cluster.local:8000/health 2>&1 || echo "⚠️  Health check falhou"
             echo ""
 
             echo "--- 9. CONFIGURAÇÕES DO DEPLOYMENT ---"
@@ -563,11 +599,11 @@ jobs:
           if [[ "${{ needs.deploy-payment-service.result }}" == "success" ]]; then
             echo "### ✅ Deploy concluído com sucesso!" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "🔗 **DNS Interno:** \`payment-service.oficinapro-dev.svc.cluster.local:8080\`" >> $GITHUB_STEP_SUMMARY
+            echo "🔗 **DNS Interno:** \`payment-service.oficinapro-dev.svc.cluster.local:8000\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "📝 **Próximos passos:**" >> $GITHUB_STEP_SUMMARY
             echo "- Verificar logs: \`kubectl logs -f -n oficinapro-dev -l app=payment-service\`" >> $GITHUB_STEP_SUMMARY
-            echo "- Testar health: \`curl http://payment-service.oficinapro-dev.svc.cluster.local:8080/health\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Testar health: \`curl http://payment-service.oficinapro-dev.svc.cluster.local:8000/health\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "### ❌ Deploy falhou" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
