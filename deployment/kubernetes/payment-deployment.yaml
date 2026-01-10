@@ -95,6 +95,6 @@ spec:
     app: payment-api
   ports:
     - protocol: TCP
-      port: 8080 # Porta interna do cluster
+      port: 8000 # Porta interna do cluster
       targetPort: 8000 # Porta do container Python
 
