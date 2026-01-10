@@ -49,52 +49,26 @@ jobs:
       - name: Find EC2 Instance IP
         id: find_ip
         run: |
-          # Prioridade 1: IP do input manual
           if [ -n "${{ github.event.inputs.instance_ip }}" ]; then
             echo "instance_ip=${{ github.event.inputs.instance_ip }}" >> $GITHUB_OUTPUT
-            echo "✅ Usando IP fornecido manualmente: ${{ github.event.inputs.instance_ip }}"
-          # Prioridade 2: AWS Parameter Store (mais rápido e confiável)
           else
-            echo "🔍 Buscando IP no AWS Parameter Store..."
-            IP=$(aws ssm get-parameter \
-              --name "/oficinapro/k3s/ec2-public-ip" \
-              --query "Parameter.Value" \
-              --output text 2>/dev/null || echo "")
-
-            # Fallback 3: Buscar via EC2 describe-instances
+            IP=$(aws ssm get-parameter --name "/oficinapro/k3s/ec2-public-ip" --query "Parameter.Value" --output text 2>/dev/null || echo "")
             if [ -z "$IP" ]; then
-              echo "⚠️  Parameter Store não encontrado, buscando via AWS CLI..."
-              IP=$(aws ec2 describe-instances \
-                --filters "Name=tag:Name,Values=*k3s-node*" \
-                          "Name=instance-state-name,Values=running" \
-                --query "Reservations[*].Instances[*].PublicIpAddress" \
-                --output text)
+              IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=*k3s-node*" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].PublicIpAddress" --output text)
             fi
-
             if [ -z "$IP" ]; then
               echo "::error::Não foi possível encontrar o IP da instância EC2"
               exit 1
             fi
             echo "instance_ip=$IP" >> $GITHUB_OUTPUT
-            echo "✅ IP encontrado: $IP"
           fi
 
-      - name: Debug SSH Key (Check format)
+      - name: Debug SSH Key
         run: |
-          if [ -z "$SSH_KEY" ]; then
-            echo "::error::A Secret SSH_PRIVATE_KEY está VAZIA!"
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "::error::SSH_PRIVATE_KEY vazia!"
             exit 1
-          else
-            echo "A Secret SSH_PRIVATE_KEY foi encontrada."
-            echo "Comprimento da chave: ${#SSH_KEY} caracteres."
-            echo "Primeira linha (verificar header): $(echo "$SSH_KEY" | head -n 1)"
-            if [[ "$SSH_KEY" != *"-----BEGIN"* ]]; then
-               echo "::error::A chave não começa com -----BEGIN. Verifique a cópia!"
-               exit 1
-            fi
           fi
-        env:
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Deploy to K3s
         uses: appleboy/ssh-action@master
@@ -103,12 +77,24 @@ jobs:
           username: ubuntu
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            # Atualizar repo (opcional, pois vamos mandar o yaml via cat ou git pull)
-            # Vamos aplicar o yaml direto
-
             IMAGE_NAME=$(echo "ghcr.io/${{ github.repository }}:${{ github.sha }}" | tr '[:upper:]' '[:lower:]')
+            
+            # Variáveis
+            export MP_TOKEN="${{ secrets.MP_TOKEN }}"
+            export NR_KEY="${{ secrets.NEW_RELIC_LICENSE_KEY }}"
+            export KUBECONFIG=~/.kube/config
 
-            # Criar arquivo de deployment temporário com a imagem correta
+            # Garantir namespace
+            /usr/local/bin/k3s kubectl create namespace oficinapro-dev --dry-run=client -o yaml | /usr/local/bin/k3s kubectl apply -f -
+
+            # Criar/Atualizar secret do GHCR
+            /usr/local/bin/k3s kubectl create secret docker-registry ghcr-secret \
+              --docker-server=ghcr.io \
+              --docker-username=${{ github.actor }} \
+              --docker-password=${{ secrets.GITHUB_TOKEN }} \
+              -n oficinapro-dev \
+              --dry-run=client -o yaml | /usr/local/bin/k3s kubectl apply -f -
+
             cat <<EOF > payment-deploy.yaml
             apiVersion: apps/v1
             kind: Deployment
@@ -137,7 +123,38 @@ jobs:
                     - containerPort: 8000
                     env:
                     - name: MP_ACCESS_TOKEN
-                      value: "${{ secrets.MP_TOKEN }}"
+                      value: "$MP_TOKEN"
+                    - name: NEW_RELIC_LICENSE_KEY
+                      value: "$NR_KEY"
+                    - name: ENVIRONMENT
+                      value: "production"
+                    - name: LOG_LEVEL
+                      value: "INFO"
+                    - name: TELEMETRY_ENABLED
+                      value: "true"
+                    - name: OTEL_SERVICE_NAME
+                      value: "oficinapro-payments"
+                    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                      value: "https://otlp.nr-data.net"
+                    resources:
+                      requests:
+                        memory: "128Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "256Mi"
+                        cpu: "500m"
+                    livenessProbe:
+                      httpGet:
+                        path: /health
+                        port: 8000
+                      initialDelaySeconds: 15
+                      periodSeconds: 20
+                    readinessProbe:
+                      httpGet:
+                        path: /health
+                        port: 8000
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
             ---
             apiVersion: v1
             kind: Service
@@ -151,29 +168,45 @@ jobs:
                 - protocol: TCP
                   port: 8080
                   targetPort: 8000
-            ---
-            apiVersion: networking.k8s.io/v1
-            kind: Ingress
-            metadata:
-              name: payment-ingress
-              namespace: oficinapro-dev
-              annotations:
-                nginx.ingress.kubernetes.io/rewrite-target: /api/v1/$2
-            spec:
-              ingressClassName: nginx
-              rules:
-              - http:
-                  paths:
-                  - path: /pagamento(/|$)(.*)
-                    pathType: Prefix
-                    backend:
-                      service:
-                        name: payment-service
-                        port:
-                          number: 8080
             EOF
-
-            export KUBECONFIG=~/.kube/config
+            
+            echo "📦 Aplicando manifesto..."
             /usr/local/bin/k3s kubectl apply -f payment-deploy.yaml
-            /usr/local/bin/k3s kubectl rollout status deployment/payment-api -n oficinapro-dev --timeout=2m
+            
+            echo "⏳ Aguardando rollout..."
+            /usr/local/bin/k3s kubectl rollout status deployment/payment-api -n oficinapro-dev --timeout=2m || true
 
+      - name: Diagnóstico Pós-Deploy
+        if: always()
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ steps.find_ip.outputs.instance_ip }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            export KUBECONFIG=~/.kube/config
+            echo "=== DIAGNÓSTICO COMPLETO ==="
+            echo "Namespace: oficinapro-dev"
+            /usr/local/bin/k3s kubectl get all -n oficinapro-dev
+            
+            echo "=== EVENTOS (Últimos 20) ==="
+            /usr/local/bin/k3s kubectl get events -n oficinapro-dev --sort-by='.lastTimestamp' | tail -n 20
+            
+            echo "=== PODS PAYMENT ==="
+            # Tentar achar pod por label
+            PODS=$(/usr/local/bin/k3s kubectl get pods -n oficinapro-dev -l app=payment-api -o name)
+            
+            if [ -z "$PODS" ]; then
+               echo "❌ NENHUM POD ENCONTRADO com label app=payment-api"
+            else
+               for pod in $PODS; do
+                 echo "--- Detalhes do Pod: $pod ---"
+                 /usr/local/bin/k3s kubectl describe $pod -n oficinapro-dev
+                 echo "--- Logs do Pod: $pod ---"
+                 /usr/local/bin/k3s kubectl logs $pod -n oficinapro-dev --tail=50
+                 
+                 POD_IP=$(/usr/local/bin/k3s kubectl get $pod -n oficinapro-dev -o jsonpath='{.status.podIP}')
+                 echo "--- Teste Curl Interno ($POD_IP:8000) ---"
+                 curl -v --connect-timeout 5 http://$POD_IP:8000/health || echo "Falha no curl"
+               done
+            fi
