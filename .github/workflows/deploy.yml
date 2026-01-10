@@ -82,6 +82,18 @@ jobs:
             # Variáveis
             export MP_TOKEN="${{ secrets.MP_TOKEN }}"
             export NR_KEY="${{ secrets.NEW_RELIC_LICENSE_KEY }}"
+            export KUBECONFIG=~/.kube/config
+
+            # Garantir namespace
+            /usr/local/bin/k3s kubectl create namespace oficinapro-dev --dry-run=client -o yaml | /usr/local/bin/k3s kubectl apply -f -
+
+            # Criar/Atualizar secret do GHCR
+            /usr/local/bin/k3s kubectl create secret docker-registry ghcr-secret \
+              --docker-server=ghcr.io \
+              --docker-username=${{ github.actor }} \
+              --docker-password=${{ secrets.GITHUB_TOKEN }} \
+              -n oficinapro-dev \
+              --dry-run=client -o yaml | /usr/local/bin/k3s kubectl apply -f -
 
             cat <<EOF > payment-deploy.yaml
             apiVersion: apps/v1
@@ -157,8 +169,6 @@ jobs:
                   port: 8080
                   targetPort: 8000
             EOF
-
-            export KUBECONFIG=~/.kube/config
             
             echo "📦 Aplicando manifesto..."
             /usr/local/bin/k3s kubectl apply -f payment-deploy.yaml
@@ -175,21 +185,28 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             export KUBECONFIG=~/.kube/config
-            echo "=== PODS ==="
-            /usr/local/bin/k3s kubectl get pods -n oficinapro-dev -l app=payment-api -o wide
+            echo "=== DIAGNÓSTICO COMPLETO ==="
+            echo "Namespace: oficinapro-dev"
+            /usr/local/bin/k3s kubectl get all -n oficinapro-dev
             
-            POD_NAME=$(/usr/local/bin/k3s kubectl get pods -n oficinapro-dev -l app=payment-api -o jsonpath="{.items[0].metadata.name}")
+            echo "=== EVENTOS (Últimos 20) ==="
+            /usr/local/bin/k3s kubectl get events -n oficinapro-dev --sort-by='.lastTimestamp' | tail -n 20
             
-            if [ -n "$POD_NAME" ]; then
-              echo "=== DESCRIBE POD: $POD_NAME ==="
-              /usr/local/bin/k3s kubectl describe pod $POD_NAME -n oficinapro-dev
-              
-              echo "=== LOGS (Últimas 50 linhas) ==="
-              /usr/local/bin/k3s kubectl logs $POD_NAME -n oficinapro-dev --tail=50
-              
-              echo "=== TESTE DE SAÚDE INTERNO ==="
-              POD_IP=$(/usr/local/bin/k3s kubectl get pod $POD_NAME -n oficinapro-dev -o jsonpath='{.status.podIP}')
-              curl -v http://$POD_IP:8000/health || echo "Falha no curl interno"
+            echo "=== PODS PAYMENT ==="
+            # Tentar achar pod por label
+            PODS=$(/usr/local/bin/k3s kubectl get pods -n oficinapro-dev -l app=payment-api -o name)
+            
+            if [ -z "$PODS" ]; then
+               echo "❌ NENHUM POD ENCONTRADO com label app=payment-api"
             else
-              echo "❌ Nenhum pod encontrado para payment-api"
+               for pod in $PODS; do
+                 echo "--- Detalhes do Pod: $pod ---"
+                 /usr/local/bin/k3s kubectl describe $pod -n oficinapro-dev
+                 echo "--- Logs do Pod: $pod ---"
+                 /usr/local/bin/k3s kubectl logs $pod -n oficinapro-dev --tail=50
+                 
+                 POD_IP=$(/usr/local/bin/k3s kubectl get $pod -n oficinapro-dev -o jsonpath='{.status.podIP}')
+                 echo "--- Teste Curl Interno ($POD_IP:8000) ---"
+                 curl -v --connect-timeout 5 http://$POD_IP:8000/health || echo "Falha no curl"
+               done
             fi
