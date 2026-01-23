@@ -141,52 +141,61 @@ jobs:
           if [ -n "${{ github.event.inputs.instance_ip }}" ]; then
             echo "Usando IP fornecido manualmente..."
             echo "instance_ip=${{ github.event.inputs.instance_ip }}" >> $GITHUB_OUTPUT
+            echo "instance_id=manual" >> $GITHUB_OUTPUT
           else
-            echo "🔍 Buscando IP no AWS Parameter Store..."
-            IP=$(aws ssm get-parameter \
-              --name "/oficinapro/k3s/ec2-public-ip" \
-              --query "Parameter.Value" \
-              --output text 2>/dev/null || echo "")
-
-            if [ -z "$IP" ]; then
-              echo "⚠️ Parameter Store não encontrado, buscando via EC2..."
-              IP=$(aws ec2 describe-instances \
-                --filters "Name=tag:Name,Values=*k3s-node*" "Name=instance-state-name,Values=running" \
-                --query "Reservations[*].Instances[*].PublicIpAddress" \
-                --output text)
-            fi
-
+            # HARDCODED: Usar instância correta do K3s (mesma do Core Service)
+            INSTANCE_ID="i-000454a92e009f79b"
+            
+            echo "🔍 Buscando IP da instância K3s: $INSTANCE_ID"
+            IP=$(aws ec2 describe-instances \
+              --instance-ids $INSTANCE_ID \
+              --query "Reservations[0].Instances[0].PublicIpAddress" \
+              --output text)
+            
             if [ -z "$IP" ] || [ "$IP" == "None" ]; then
-              echo "::error::Não foi possível encontrar instância EC2 rodando."
+              echo "::error::❌ Instância $INSTANCE_ID não encontrada ou sem IP público"
+              echo "💡 Verifique se a instância K3s está rodando:"
+              echo "   aws ec2 describe-instances --instance-ids $INSTANCE_ID"
               exit 1
             fi
-
-            echo "Instância encontrada: $IP"
+            
+            echo "✅ Instância K3s encontrada:"
+            echo "   Instance ID: $INSTANCE_ID"
+            echo "   Public IP:   $IP"
+            echo "   Tag Name:    fiap-oficinapro-kb-k3s-node"
+            echo ""
             echo "instance_ip=$IP" >> $GITHUB_OUTPUT
+            echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
           fi
 
       - name: 'Verificar estado da instância EC2'
         id: verify_instance
         run: |
           IP="${{ steps.find_ip.outputs.instance_ip }}"
-          echo "🔍 Verificando estado da instância: $IP"
+          INSTANCE_ID="${{ steps.find_ip.outputs.instance_id }}"
+          
+          echo "🔍 Verificando estado da instância K3s:"
+          echo "   Instance ID: $INSTANCE_ID"
+          echo "   Public IP:   $IP"
+          echo ""
 
-          # Buscar Instance ID pelo IP
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=ip-address,Values=$IP" "Name=instance-state-name,Values=running" \
-            --query "Reservations[*].Instances[*].InstanceId" \
+          # Verificar estado da instância
+          STATE=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query "Reservations[0].Instances[0].State.Name" \
             --output text)
 
-          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
-            echo "::error::❌ Instância com IP $IP não está RUNNING!"
-            echo "💡 Dica: Execute o workflow 'App Infra CI/CD' para provisionar/iniciar a infra"
+          if [ "$STATE" != "running" ]; then
+            echo "::error::❌ Instância $INSTANCE_ID não está RUNNING!"
+            echo "Estado atual: $STATE"
+            echo "💡 Dica: Inicie a instância ou execute o workflow 'App Infra CI/CD'"
             exit 1
           fi
 
-          echo "✅ Instância $INSTANCE_ID está RUNNING"
-          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "✅ Instância $INSTANCE_ID está RUNNING (estado: $STATE)"
 
           # Verificar conectividade SSH (retry até 3x)
+          echo ""
           echo "🔌 Testando conectividade SSH..."
           for i in {1..3}; do
             if timeout 10 bash -c "cat < /dev/null > /dev/tcp/$IP/22"; then
@@ -201,7 +210,7 @@ jobs:
           echo "💡 Possíveis causas:"
           echo "   - Security Group bloqueando SSH"
           echo "   - Instância ainda inicializando"
-          echo "   - Firewall local bloqueando conexões"
+          echo "   - SSH service não está rodando"
           exit 1
 
       - name: 'Deploy do Payment Service no Kubernetes'
