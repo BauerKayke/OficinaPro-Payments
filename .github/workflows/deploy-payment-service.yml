@@ -62,9 +62,6 @@ jobs:
           tags: |
             ${{ steps.image_info.outputs.full_image }}
             ${{ steps.image_info.outputs.repo_name }}:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
-            org.opencontainers.image.revision=${{ github.sha }}
 
       - name: 'Testar imagem localmente'
         run: |
@@ -145,20 +142,20 @@ jobs:
           else
             # HARDCODED: Usar instância correta do K3s (mesma do Core Service)
             INSTANCE_ID="i-000454a92e009f79b"
-            
+
             echo "🔍 Buscando IP da instância K3s: $INSTANCE_ID"
             IP=$(aws ec2 describe-instances \
               --instance-ids $INSTANCE_ID \
               --query "Reservations[0].Instances[0].PublicIpAddress" \
               --output text)
-            
+
             if [ -z "$IP" ] || [ "$IP" == "None" ]; then
               echo "::error::❌ Instância $INSTANCE_ID não encontrada ou sem IP público"
               echo "💡 Verifique se a instância K3s está rodando:"
               echo "   aws ec2 describe-instances --instance-ids $INSTANCE_ID"
               exit 1
             fi
-            
+
             echo "✅ Instância K3s encontrada:"
             echo "   Instance ID: $INSTANCE_ID"
             echo "   Public IP:   $IP"
@@ -173,7 +170,7 @@ jobs:
         run: |
           IP="${{ steps.find_ip.outputs.instance_ip }}"
           INSTANCE_ID="${{ steps.find_ip.outputs.instance_id }}"
-          
+
           echo "🔍 Verificando estado da instância K3s:"
           echo "   Instance ID: $INSTANCE_ID"
           echo "   Public IP:   $IP"
