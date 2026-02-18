@@ -34,9 +34,7 @@ tracer = get_tracer(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gerencia o ciclo de vida da aplicação."""
-    # Startup: Configurar OpenTelemetry
-    setup_telemetry(app)
-
+    # Startup: Apenas telemetria de logs (instrumentação já foi feita)
     logger.info("Payment service starting",
                 service="oficinapro-payments",
                 environment=os.getenv("ENVIRONMENT", "production"),
@@ -85,6 +83,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Configurar telemetria ANTES de qualquer middleware ou rota
+setup_telemetry(app)
 
 
 @app.middleware("http")

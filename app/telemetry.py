@@ -41,7 +41,7 @@ def setup_telemetry(app=None):
         return
 
     # Configurações
-    service_name = os.getenv("OTEL_SERVICE_NAME", "oficinapro-payments")
+    service_name = os.getenv("OTEL_SERVICE_NAME", "oficinapro-payment-service")
     service_version = os.getenv("SERVICE_VERSION", "1.0.0")
     environment = os.getenv("ENVIRONMENT", "production")
 
