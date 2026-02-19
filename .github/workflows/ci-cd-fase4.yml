@@ -1,0 +1,344 @@
+# CI/CD Pipeline - Payment Service (Fase 4)
+name: 'CI/CD - Payment Service'
+
+on:
+  push:
+    branches: [main, develop, feature/payments-metrics]
+    paths:
+      - 'app/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - '.github/workflows/ci-cd-fase4.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  K8S_NAMESPACE: oficinapro-prod
+  SERVICE_NAME: payment-service
+  K3S_INSTANCE_ID: i-0150e656c28a92901
+  K3S_PUBLIC_IP: 52.73.165.218
+
+jobs:
+  build-and-test:
+    name: 'Build e Testes'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v4
+
+      - name: 'Configurar Python 3.11'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 'Instalar Dependências'
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio httpx
+
+      - name: 'Executar Testes'
+        run: |
+          echo "🧪 Executando testes..."
+          pytest app/ --cov=app --cov-report=term-missing --cov-report=xml -v || true
+
+      - name: 'Login no GitHub Container Registry'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Build e Push da Imagem Docker'
+        id: docker_build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/payment-service:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/payment-service:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: 'Test Docker Image'
+        run: |
+          echo "🐳 Testando imagem Docker..."
+          
+          docker run -d \
+            --name test-payment \
+            -p 8000:8000 \
+            -e MP_ACCESS_TOKEN="TEST-TOKEN" \
+            ghcr.io/${{ github.repository_owner }}/payment-service:${{ github.sha }}
+          
+          sleep 20
+          
+          if curl -f http://localhost:8000/health; then
+            echo "✅ Container health check passed!"
+          else
+            echo "❌ Container health check failed!"
+            docker logs test-payment
+            exit 1
+          fi
+          
+          docker stop test-payment
+          docker rm test-payment
+
+  deploy-to-k3s:
+    name: 'Deploy no K3s (Fase 4)'
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: 'Checkout'
+        uses: actions/checkout@v4
+
+      - name: 'Configurar AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 'Verificar EC2 K3s'
+        run: |
+          echo "🔍 Verificando instância K3s..."
+          
+          STATE=$(aws ec2 describe-instances \
+            --instance-ids ${{ env.K3S_INSTANCE_ID }} \
+            --query 'Reservations[0].Instances[0].State.Name' \
+            --output text)
+          
+          if [ "$STATE" != "running" ]; then
+            echo "::error::Instância K3s não está rodando"
+            exit 1
+          fi
+          
+          echo "✅ Instância K3s está rodando"
+
+      - name: 'Deploy no Kubernetes'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ env.K3S_PUBLIC_IP }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          timeout: 300s
+          script: |
+            set -e
+            
+            # Configurar Kubeconfig
+            mkdir -p ~/.kube
+            sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+            sudo chown ubuntu:ubuntu ~/.kube/config
+            export KUBECONFIG=~/.kube/config
+            
+            echo "=== Deploy Payment Service (Fase 4) ==="
+            IMAGE="ghcr.io/${{ github.repository_owner }}/payment-service:${{ github.sha }}"
+            echo "Imagem: ${IMAGE}"
+            
+            # Criar namespace
+            kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+            
+            # Criar Secret do GHCR
+            kubectl create secret docker-registry ghcr-secret \
+              --docker-server=ghcr.io \
+              --docker-username=${{ github.actor }} \
+              --docker-password=${{ secrets.GHCR_PAT }} \
+              --docker-email=ci@oficinapro.com \
+              -n ${{ env.K8S_NAMESPACE }} \
+              --dry-run=client -o yaml | kubectl apply -f -
+            
+            # Criar Secrets
+            kubectl create secret generic payment-service-secrets \
+              --from-literal=MP_ACCESS_TOKEN="${{ secrets.MP_TOKEN }}" \
+              --from-literal=NEW_RELIC_LICENSE_KEY="${{ secrets.NEW_RELIC_LICENSE_KEY }}" \
+              -n ${{ env.K8S_NAMESPACE }} \
+              --dry-run=client -o yaml | kubectl apply -f -
+            
+            # Criar ConfigMap
+            cat <<EOF | kubectl apply -f -
+            apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: payment-service-config
+              namespace: ${{ env.K8S_NAMESPACE }}
+            data:
+              OTEL_SERVICE_NAME: "payment-service"
+              LOG_LEVEL: "INFO"
+              ENVIRONMENT: "production"
+              PORT: "8000"
+            EOF
+            
+            # Criar Deployment
+            cat <<EOF | kubectl apply -f -
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: payment-service
+              namespace: ${{ env.K8S_NAMESPACE }}
+              labels:
+                app: payment-service
+                version: v1
+            spec:
+              replicas: 2
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxSurge: 1
+                  maxUnavailable: 0
+              selector:
+                matchLabels:
+                  app: payment-service
+              template:
+                metadata:
+                  labels:
+                    app: payment-service
+                    version: v1
+                spec:
+                  imagePullSecrets:
+                  - name: ghcr-secret
+                  containers:
+                  - name: payment-service
+                    image: ${IMAGE}
+                    imagePullPolicy: Always
+                    ports:
+                    - containerPort: 8000
+                      name: http
+                    envFrom:
+                    - configMapRef:
+                        name: payment-service-config
+                    - secretRef:
+                        name: payment-service-secrets
+                    resources:
+                      requests:
+                        memory: "256Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "512Mi"
+                        cpu: "500m"
+                    livenessProbe:
+                      httpGet:
+                        path: /health
+                        port: 8000
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                      failureThreshold: 3
+                    readinessProbe:
+                      httpGet:
+                        path: /health
+                        port: 8000
+                      initialDelaySeconds: 10
+                      periodSeconds: 5
+                      timeoutSeconds: 3
+                      failureThreshold: 3
+                    startupProbe:
+                      httpGet:
+                        path: /health
+                        port: 8000
+                      initialDelaySeconds: 0
+                      periodSeconds: 10
+                      timeoutSeconds: 3
+                      failureThreshold: 30
+            ---
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: payment-service
+              namespace: ${{ env.K8S_NAMESPACE }}
+              labels:
+                app: payment-service
+            spec:
+              type: ClusterIP
+              ports:
+              - port: 8000
+                targetPort: 8000
+                protocol: TCP
+                name: http
+              selector:
+                app: payment-service
+            ---
+            apiVersion: autoscaling/v2
+            kind: HorizontalPodAutoscaler
+            metadata:
+              name: payment-service-hpa
+              namespace: ${{ env.K8S_NAMESPACE }}
+            spec:
+              scaleTargetRef:
+                apiVersion: apps/v1
+                kind: Deployment
+                name: payment-service
+              minReplicas: 2
+              maxReplicas: 5
+              metrics:
+              - type: Resource
+                resource:
+                  name: cpu
+                  target:
+                    type: Utilization
+                    averageUtilization: 70
+            EOF
+            
+            echo "✅ Manifests aplicados"
+            
+            # Aguardar rollout
+            echo "⏳ Aguardando rollout..."
+            kubectl rollout status deployment/payment-service -n ${{ env.K8S_NAMESPACE }} --timeout=5m
+            
+            echo "✅ Deploy concluído!"
+
+      - name: 'Verificar Deployment'
+        if: always()
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ env.K3S_PUBLIC_IP }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            export KUBECONFIG=~/.kube/config
+            
+            echo "=== STATUS DO DEPLOYMENT ==="
+            kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=payment-service -o wide
+            echo ""
+            kubectl get svc -n ${{ env.K8S_NAMESPACE }} payment-service
+            echo ""
+            kubectl get hpa -n ${{ env.K8S_NAMESPACE }} payment-service-hpa
+            echo ""
+            echo "=== LOGS (últimas 50 linhas) ==="
+            kubectl logs -n ${{ env.K8S_NAMESPACE }} -l app=payment-service --tail=50
+
+  summary:
+    name: 'Resumo do Deploy'
+    runs-on: ubuntu-latest
+    needs: [build-and-test, deploy-to-k3s]
+    if: always()
+
+    steps:
+      - name: 'Gerar Resumo'
+        run: |
+          echo "## 🚀 Deploy Payment Service (Fase 4)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Autor:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build & Test | ${{ needs.build-and-test.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy K3s | ${{ needs.deploy-to-k3s.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.deploy-to-k3s.result }}" == "success" ]]; then
+            echo "### ✅ Deploy concluído com sucesso!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Acesso Interno:** \`payment-service.oficinapro-prod.svc.cluster.local:8000\`" >> $GITHUB_STEP_SUMMARY
+          fi

@@ -34,17 +34,46 @@ tracer = get_tracer(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gerencia o ciclo de vida da aplicação."""
-    # Startup: Configurar OpenTelemetry
-    setup_telemetry(app)
-
+    # Startup: Apenas telemetria de logs (instrumentação já foi feita)
     logger.info("Payment service starting",
                 service="oficinapro-payments",
                 environment=os.getenv("ENVIRONMENT", "production"),
                 telemetry="enabled")
+    
+    # Iniciar SQS Consumer em background thread se habilitado
+    sqs_consumer = None
+    consumer_thread = None
+    
+    if os.getenv('ENABLE_SQS_CONSUMER', 'true').lower() == 'true':
+        try:
+            from app.messaging import SQSPaymentConsumer
+            import threading
+            
+            sqs_consumer = SQSPaymentConsumer()
+            consumer_thread = threading.Thread(
+                target=sqs_consumer.start_consuming,
+                daemon=True,
+                name="SQS-Consumer"
+            )
+            consumer_thread.start()
+            
+            logger.info("SQS Consumer thread started",
+                       thread_name="SQS-Consumer",
+                       queue=os.getenv('SQS_PAYMENT_COMMANDS_QUEUE'))
+        except Exception as e:
+            logger.error(f"Erro ao iniciar SQS Consumer: {e}", exc_info=True)
+    else:
+        logger.info("SQS Consumer desabilitado via ENABLE_SQS_CONSUMER=false")
+    
     yield
 
-    # Shutdown: Flush telemetry
+    # Shutdown: Flush telemetry e parar consumer
     logger.info("Payment service shutting down")
+    
+    if sqs_consumer:
+        sqs_consumer.stop()
+        logger.info("SQS Consumer stopped")
+    
     shutdown_telemetry()
 
 
@@ -54,6 +83,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Configurar telemetria ANTES de qualquer middleware ou rota
+setup_telemetry(app)
 
 
 @app.middleware("http")

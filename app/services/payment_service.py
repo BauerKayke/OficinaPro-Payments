@@ -10,7 +10,8 @@ import mercadopago
 import os
 from app.schemas import PaymentRequest, PaymentResponse, PaymentMethod, RefundRequest, RefundResponse
 from app.logging_config import get_logger
-from app.telemetry import get_tracer, get_meter
+from app.telemetry import get_tracer, get_meter, force_flush_metrics
+from app.database.dynamodb import DynamoDBPaymentRepository
 from opentelemetry import trace
 
 # Logger estruturado para observabilidade
@@ -49,6 +50,16 @@ class PaymentService:
         else:
             logger.info("Payment service initialized", provider="mercadopago")
             self.sdk = mercadopago.SDK(access_token)
+        
+        # Inicializar repositório DynamoDB (NoSQL - Requisito Fase 4)
+        try:
+            self.payment_repository = DynamoDBPaymentRepository()
+            logger.info("DynamoDB repository initialized", 
+                       database="dynamodb",
+                       requirement="Fase 4 NoSQL")
+        except Exception as e:
+            logger.error("Failed to initialize DynamoDB repository", error=str(e))
+            self.payment_repository = None
 
     def process_payment(self, request: PaymentRequest) -> PaymentResponse:
         """Processa um pagamento com tracing OpenTelemetry."""
@@ -94,6 +105,41 @@ class PaymentService:
                     "method": request.method.value,
                     "success": str(response.success)
                 })
+
+                # Flush síncrono de métricas para envio imediato
+                force_flush_metrics(timeout_millis=500)
+
+                # Persistir pagamento no DynamoDB (NoSQL - Requisito Fase 4)
+                if self.payment_repository:
+                    try:
+                        payment_data = {
+                            'order_id': request.order_id,
+                            'amount': float(request.amount),
+                            'method': request.method.value,
+                            'status': response.status,
+                            'transaction_id': response.transaction_id,
+                            'payer_email': request.payer_email,
+                            'description': request.description,
+                            'success': response.success,
+                            'message': response.message,
+                            'payment_url': response.payment_url or '',
+                            'qr_code': response.qr_code or '',
+                            'qr_code_base64': response.qr_code_base64 or '',
+                            'barcode_content': response.barcode_content or ''
+                        }
+                        saved = self.payment_repository.create_payment(payment_data)
+                        span.set_attribute("dynamodb.saved", True)
+                        span.set_attribute("dynamodb.payment_id", saved['payment_id'])
+                        logger.info("Payment persisted in DynamoDB",
+                                   payment_id=saved['payment_id'],
+                                   order_id=request.order_id,
+                                   database="dynamodb")
+                    except Exception as db_error:
+                        logger.error("Failed to persist payment in DynamoDB",
+                                   error=str(db_error),
+                                   order_id=request.order_id)
+                        # Não falhar a operação se DynamoDB falhar
+                        span.set_attribute("dynamodb.error", str(db_error))
 
                 return response
 
@@ -271,6 +317,9 @@ class PaymentService:
                         "status": response.get("status", "approved")
                     })
 
+                    # Flush síncrono de métricas
+                    force_flush_metrics(timeout_millis=500)
+
                     logger.info("Refund processed successfully",
                                transaction_id=request.transaction_id,
                                refund_id=refund_id,
@@ -294,6 +343,9 @@ class PaymentService:
                         "status": "error"
                     })
 
+                    # Flush síncrono de métricas
+                    force_flush_metrics(timeout_millis=500)
+
                     logger.error("Refund failed",
                                 transaction_id=request.transaction_id,
                                 error=error_message,
@@ -314,6 +366,9 @@ class PaymentService:
                     "success": "false",
                     "status": "exception"
                 })
+
+                # Flush síncrono de métricas
+                force_flush_metrics(timeout_millis=500)
 
                 logger.exception("Refund processing failed",
                                transaction_id=request.transaction_id,
